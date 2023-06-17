@@ -14,7 +14,7 @@ bool DEBUG_MODE = true;
 byte time_h = 0;
 byte time_m = 0;
 
-uint8_t data[] = { 0xff, 0xff, 0xff, 0xff };
+uint8_t data[] = { 0x00, 0x00, 0x00, 0x00 };
 
 // Display vars
 #define TIMER_DELAY   500
@@ -31,6 +31,7 @@ uint8_t mask; // to display dots
 unsigned long digit_timer; // digit timer
 unsigned long dot_timer; // digit timer
 unsigned long blink_timer; // blink timer
+unsigned long alarm_check_timer; // alarm check timer 
 
 uint8_t current_brightness = 5;
 bool blink_show_state = true;
@@ -43,14 +44,24 @@ bool pmFlag;
 
 bool normal_clock_mode = true;
 
+bool edit_time_mode = false;
+byte edit_time_mode_num = 0;
+
 bool edit_time_hours_mode = false;
 bool edit_time_minutes_mode = false;
 
-bool edit_alarm_hours_mode = false;
-bool edit_alarm_minutes_mode = false;
-bool edit_alarm_repeat_mode = false;
+bool edit_alarm_mode = false;
+byte edit_alarm_mode_num = 0;
 
-bool alarm_state = false; // on/off state for device
+bool alarm_state = false; // on/off state for playing alarm
+
+byte alarm_hours = 0;
+byte alarm_minutes = 0;
+bool alarm_repeat = false;
+byte alarm_time_repeat = 0;
+
+#define ALARM_MAX_TIME_REPEAT 3
+
 
 // Button vars
 #define BTN_BRIGHTNESS_PIN 8
@@ -129,17 +140,32 @@ int divider = 0, noteDuration = 0;
 // update device settings
 void updateEEPROM() {
   EEPROM.write(1, current_brightness);
+  EEPROM.write(2, alarm_hours);
+  EEPROM.write(3, alarm_minutes);
+  EEPROM.write(4, alarm_repeat);
 }
 
 // read device settings
 void readEEPROM() {
   current_brightness = EEPROM.read(1);
+  alarm_hours = EEPROM.read(2);
+  alarm_minutes = EEPROM.read(3);
+  alarm_repeat = EEPROM.read(4);
 
   if (current_brightness > 7) {
     current_brightness = 3;
     updateEEPROM();
   }
- 
+
+  if (alarm_hours >= 24) {
+    alarm_hours = 0;
+    updateEEPROM();
+  }
+
+  if (alarm_minutes >= 60) {
+    alarm_minutes = 0;
+    updateEEPROM();
+  }
 }
 
 // for debounce buttons
@@ -156,14 +182,27 @@ bool debounce(uint8_t btn_pin, bool last) {
 }
 
 void setup() {
-  if (DEBUG_MODE) {
-    Serial.begin(9600);
-  }
-
   // load saved settings
   readEEPROM();
-  Serial.print("Brightness: ");
-  Serial.println(current_brightness);
+  
+  if (DEBUG_MODE) {
+    Serial.begin(9600);
+  
+    Serial.print("Brightness: ");
+    Serial.println(current_brightness);
+
+    Serial.print("Alarm Hours: ");
+    Serial.println(alarm_hours);
+
+    Serial.print("Alarm Minutes: ");
+    Serial.println(alarm_minutes);
+
+    Serial.print("Alarm Repeat: ");
+    Serial.println(alarm_repeat);
+
+    // rtc.setHour(12);
+    // rtc.setMinute(34);
+  }
 
   // setup display
   display.setBrightness(current_brightness);
@@ -172,8 +211,6 @@ void setup() {
 
   // setup clock
   Wire.begin();
-  rtc.setHour(2);
-  rtc.setMinute(55);
 
   // setup buzzer
   //pinMode(BUZZER_PIN, OUTPUT);
@@ -214,21 +251,28 @@ void loop() {
 
   if (btn_time_last_state == HIGH && btn_time_current_state == LOW)
   {
-    if (edit_time_hours_mode) {
-      // if edit hours mode active turn off it and turn on edit minutes mode
-      edit_time_hours_mode = false;
-      edit_time_minutes_mode = true;
-    } else {
-      if (edit_time_minutes_mode) {
-        // if edit minutes mode active turn off it and turn on normal clock mode
-        edit_time_minutes_mode = false;
-        normal_clock_mode = true;
-      } else {
-        // if edit hours and minutes modes disabled turn on edit hours mode and turn off mormal clock mode
-        edit_time_hours_mode = true;
-        normal_clock_mode = false;
-      }
-    }  
+    if (edit_alarm_mode)
+      return;
+
+    edit_time_mode_num++;
+
+    //edit_alarm_mode
+    switch (edit_time_mode_num) {
+      case 1: // time mode hours
+      case 2: // time mode minutes
+      case 3: // time mode seconds
+          edit_time_mode = true;
+          normal_clock_mode = false;
+        break;
+    }
+
+    if (edit_time_mode_num > 3)  {
+      edit_time_mode = false; // exit time edit mode
+      normal_clock_mode = true; // return normal mode for clock
+      edit_time_mode_num = 0; // reset mode num
+    }
+
+    display.clear();
   }
 
   btn_time_last_state = btn_time_current_state;
@@ -239,7 +283,7 @@ void loop() {
 
   if (btn_action_last_state == HIGH && btn_action_current_state == LOW)
   {
-    if (edit_time_hours_mode) {
+    if (edit_time_mode && edit_time_mode_num == 1) {
       // increase hour
       time_h = rtc.getHour(h12Flag, pmFlag) + 1;
 
@@ -248,10 +292,10 @@ void loop() {
 
       rtc.setHour(time_h);
 
-      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), MASK_NO_DOTS, true);
     }
 
-    if (edit_time_minutes_mode) {
+    if (edit_time_mode && edit_time_mode_num == 2) {
       // increase minutes
       time_m = rtc.getMinute() + 1;
 
@@ -260,81 +304,176 @@ void loop() {
 
       rtc.setMinute(time_m);
 
-      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), MASK_NO_DOTS, true);
+    }
+
+    if (edit_time_mode && edit_time_mode_num == 3) {
+      // reset seconds
+
+      rtc.setSecond(0);
+
+      display.clear();
+      display.showNumberDecEx(rtc.getSecond(), MASK_DOTS, true, 2, 2);
+    }
+
+    if (edit_alarm_mode && edit_alarm_mode_num == 1) {
+      // increase hour
+      alarm_hours += 1;
+
+      if (alarm_hours >= 24)
+        alarm_hours = 0;
+
+      display.showNumberDecEx(alarm_hours * 100 + alarm_minutes, MASK_NO_DOTS, true);
+      updateEEPROM();
+    }
+
+    if (edit_alarm_mode && edit_alarm_mode_num == 2) {
+      // increase minutes
+      alarm_minutes += 1;
+
+      if (alarm_minutes >= 60)
+        alarm_minutes = 0;
+
+      display.showNumberDecEx(alarm_hours * 100 + alarm_minutes, MASK_NO_DOTS, true);
+      updateEEPROM();
+    }
+
+    if (edit_alarm_mode && edit_alarm_mode_num == 3) {
+      alarm_repeat = !alarm_repeat;
+      updateEEPROM();
+    }
+
+    if (alarm_state) {
+      // stop alarm
+      alarm_state = false;
+      current_melody_note = 0;
+      alarm_time_repeat = 0;
     }
   }
 
   btn_action_last_state = btn_action_current_state;
 
+  // check if setup ALARM BTN was pressed
+  btn_alarm_current_state = debounce(BTN_ALARM_PIN, btn_alarm_last_state);
+
+  if (btn_alarm_last_state == HIGH && btn_alarm_current_state == LOW)
+  {
+    if (edit_time_hours_mode || edit_time_minutes_mode)
+      return;
+    
+    edit_alarm_mode_num++;
+
+    //edit_alarm_mode
+    switch (edit_alarm_mode_num) {
+      case 1: // alarm mode hours
+      case 2: // alarm mode minutes
+      case 3: // alarm mode repeat
+          edit_alarm_mode = true;
+          normal_clock_mode = false;
+        break;
+    }
+
+    if (edit_alarm_mode_num > 3)  {
+      edit_alarm_mode = false; // exit alarm mode
+      normal_clock_mode = true; // return normal mode for clock
+      edit_alarm_mode_num = 0; // reset mode num
+    }
+  }
+
+  btn_alarm_last_state = btn_alarm_current_state;
+
   // Edit Hours Mode
-  if (edit_time_hours_mode) {
+  if (edit_time_mode && edit_time_mode_num == 1) {
     if (millis() - blink_timer > TIMER_BLINK_TICK) {
       blink_timer = millis();  // reset digit timer
       blink_show_state = !blink_show_state;
 
-      if (DEBUG_MODE == true) {
-        Serial.print("Blink state: ");
-        Serial.println(blink_show_state);
-      }
-
       if (blink_show_state) {
-        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), MASK_NO_DOTS, true);
       } else {
         display.clear();
-        display.showNumberDecEx(rtc.getMinute(), mask, false, 2, 2);
+        display.showNumberDecEx(rtc.getMinute(), MASK_NO_DOTS, true, 2, 2);
       }
     }
   }
 
   // Edit Minutes Mode
-  if (edit_time_minutes_mode) {
+  if (edit_time_mode && edit_time_mode_num == 2) {
     if (millis() - blink_timer > TIMER_BLINK_TICK) {
       blink_timer = millis();  // reset digit timer
       blink_show_state = !blink_show_state;
 
-      if (DEBUG_MODE == true) {
-        Serial.print("Blink state: ");
-        Serial.println(blink_show_state);
-      }
-
       if (blink_show_state) {
-        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), MASK_NO_DOTS, true);
       } else {
         display.clear();
-        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag), mask, true, 2, 0);
+        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag), MASK_NO_DOTS, true, 2, 0);
       }
     }
   }
 
-  if (edit_alarm_hours_mode) {
-    
+  // Edit Seconds Mode
+  if (edit_time_mode && edit_time_mode_num == 3) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
+      
+      display.showNumberDecEx(rtc.getSecond(), MASK_DOTS, true, 2, 2);
+    }
+  }
+
+  // Edit Alarm Hours Mode
+  if (edit_alarm_mode && edit_alarm_mode_num == 1) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
+
+      if (blink_show_state) {
+        display.showNumberDecEx(alarm_hours * 100 + alarm_minutes, MASK_NO_DOTS, true);
+      } else {
+        display.clear();
+        display.showNumberDecEx(alarm_minutes, MASK_NO_DOTS, true, 2, 2);
+      }
+    }
   }
   
-  if (edit_alarm_minutes_mode) {
+  // Edit Alarm Minutes Mode
+  if (edit_alarm_mode && edit_alarm_mode_num == 2) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
 
+      if (blink_show_state) {
+        display.showNumberDecEx(alarm_hours * 100 + alarm_minutes, MASK_NO_DOTS, true);
+      } else {
+        display.clear();
+        display.showNumberDecEx(alarm_hours, MASK_NO_DOTS, true, 2, 0);
+      }
+    }
   }
 
-  if (edit_alarm_repeat_mode) {
+  if (edit_alarm_mode && edit_alarm_mode_num == 3) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
 
+      if (blink_show_state) {
+        data[0] = display.encodeDigit(10);
+        display.setSegments(data);
+        display.showNumberDecEx(alarm_repeat, MASK_NO_DOTS, true, 1, 3);
+      } else {
+        display.clear();
+        data[0] = display.encodeDigit(10);
+        display.setSegments(data);
+      }
+    }
   }
 
   if (normal_clock_mode) {
     if (millis() - digit_timer > TIMER_DELAY) {
       digit_timer = millis();  // reset digit timer
 
-      // data[0] = display.encodeDigit(h1);
-      // data[1] = display.encodeDigit(h2);
-      // data[2] = display.encodeDigit(m1);
-      // data[3] = display.encodeDigit(m2);
-      // display.setSegments(data);
-
       display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
-
-      // Serial.print(rtc.getHour(h12Flag, pmFlag), DEC); //24-hr
-      // Serial.print(":");
-      // Serial.print(rtc.getMinute(), DEC);
-      // Serial.print(":");
-      // Serial.println(rtc.getSecond(), DEC);
     }
 
     if (millis() - dot_timer > TIMER_DOTS_TICK) {
@@ -347,8 +486,19 @@ void loop() {
       }
     }
   }
+
+  // check alarm
+  //if (normal_clock_mode) { // TODO: think about alarm in settings modes
+    if (!alarm_state) {
+      if (millis() - alarm_check_timer > TIMER_DOTS_TICK) {
+        if ((alarm_hours == rtc.getHour(h12Flag, pmFlag)) && (alarm_minutes == rtc.getMinute()) && (rtc.getSecond() == 0)) {
+          alarm_state = true;
+        }
+      }
+    }
+  //}
   
-  // alarm
+  // alarm play melody
   if (alarm_state) {
     if (millis() - melody_timer > noteDuration) {
       melody_timer = millis();  // reset melody stimer
@@ -371,6 +521,13 @@ void loop() {
 
       if (current_melody_note >= notes) {
         current_melody_note = 0;
+
+        alarm_time_repeat++;
+
+        if (alarm_time_repeat >= ALARM_MAX_TIME_REPEAT) {
+          alarm_state = false;
+          alarm_time_repeat = 0;
+        }
       }
     }
   }
