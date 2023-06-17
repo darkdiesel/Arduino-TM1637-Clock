@@ -5,6 +5,8 @@
 #include <Wire.h>
 #include <EEPROM.h>
 
+bool DEBUG_MODE = true;
+
 // Module connection pins (Digital Pins)
 #define DISPLAY_CLK 2
 #define DISPLAY_DIO 3
@@ -17,6 +19,7 @@ uint8_t data[] = { 0xff, 0xff, 0xff, 0xff };
 // Display vars
 #define TIMER_DELAY   500
 #define TIMER_DOTS_TICK 1000
+#define TIMER_BLINK_TICK 500
 
 #define MASK_DOTS 0b01000000
 #define MASK_NO_DOTS 0b00000000
@@ -27,14 +30,18 @@ uint8_t mask; // to display dots
 
 unsigned long digit_timer; // digit timer
 unsigned long dot_timer; // digit timer
+unsigned long blink_timer; // blink timer
 
 uint8_t current_brightness = 5;
+bool blink_show_state = true;
 
 // clock vars
 DS3231 rtc;
 
 bool h12Flag;
 bool pmFlag;
+
+bool normal_clock_mode = true;
 
 bool edit_time_hours_mode = false;
 bool edit_time_minutes_mode = false;
@@ -149,7 +156,9 @@ bool debounce(uint8_t btn_pin, bool last) {
 }
 
 void setup() {
-  Serial.begin(9600);
+  if (DEBUG_MODE) {
+    Serial.begin(9600);
+  }
 
   // load saved settings
   readEEPROM();
@@ -164,7 +173,7 @@ void setup() {
   // setup clock
   Wire.begin();
   rtc.setHour(2);
-  rtc.setMinute(27);
+  rtc.setMinute(55);
 
   // setup buzzer
   //pinMode(BUZZER_PIN, OUTPUT);
@@ -177,7 +186,7 @@ void setup() {
 }
 
 void loop() {
-    // check if change brightness button was pressed
+  // check if change BRIGHTNESS BTN was pressed
   btn_brightness_current_state = debounce(BTN_BRIGHTNESS_PIN, btn_brightness_last_state);
 
   // if last state was low and curret low change mode. Current state low as pressed because used INPUT_PULLUP pin mode
@@ -189,43 +198,157 @@ void loop() {
 
     display.setBrightness(current_brightness);
     
-    Serial.print("Brightness: ");
-    Serial.println(current_brightness);
-    
+    if (DEBUG_MODE) {
+      Serial.print("Brightness: ");
+      Serial.println(current_brightness);
+    }
+
     updateEEPROM();
   }
 
   btn_brightness_last_state = btn_brightness_current_state;
+  
+  
+  // check if setup TIME BTN was pressed
+  btn_time_current_state = debounce(BTN_TIME_PIN, btn_time_last_state);
 
-
-  if (millis() - digit_timer > TIMER_DELAY) {
-    digit_timer = millis();  // reset digit timer
-
-    // data[0] = display.encodeDigit(h1);
-    // data[1] = display.encodeDigit(h2);
-    // data[2] = display.encodeDigit(m1);
-    // data[3] = display.encodeDigit(m2);
-    // display.setSegments(data);
-
-    display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
-
-    // Serial.print(rtc.getHour(h12Flag, pmFlag), DEC); //24-hr
-    // Serial.print(":");
-    // Serial.print(rtc.getMinute(), DEC);
-    // Serial.print(":");
-    // Serial.println(rtc.getSecond(), DEC);
+  if (btn_time_last_state == HIGH && btn_time_current_state == LOW)
+  {
+    if (edit_time_hours_mode) {
+      // if edit hours mode active turn off it and turn on edit minutes mode
+      edit_time_hours_mode = false;
+      edit_time_minutes_mode = true;
+    } else {
+      if (edit_time_minutes_mode) {
+        // if edit minutes mode active turn off it and turn on normal clock mode
+        edit_time_minutes_mode = false;
+        normal_clock_mode = true;
+      } else {
+        // if edit hours and minutes modes disabled turn on edit hours mode and turn off mormal clock mode
+        edit_time_hours_mode = true;
+        normal_clock_mode = false;
+      }
+    }  
   }
 
-  if (millis() - dot_timer > TIMER_DOTS_TICK) {
-    dot_timer = millis();  // reset dot timer
+  btn_time_last_state = btn_time_current_state;
 
-    if (mask == MASK_DOTS) {
-      mask = MASK_NO_DOTS;
-    } else {
-      mask = MASK_DOTS;
+  
+  // check if setup ACTION BTN was pressed
+  btn_action_current_state = debounce(BTN_ACTION_PIN, btn_action_last_state);
+
+  if (btn_action_last_state == HIGH && btn_action_current_state == LOW)
+  {
+    if (edit_time_hours_mode) {
+      // increase hour
+      time_h = rtc.getHour(h12Flag, pmFlag) + 1;
+
+      if (time_h >= 24)
+        time_h = 0;
+
+      rtc.setHour(time_h);
+
+      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+    }
+
+    if (edit_time_minutes_mode) {
+      // increase minutes
+      time_m = rtc.getMinute() + 1;
+
+      if (time_m >= 60)
+        time_m = 0;
+
+      rtc.setMinute(time_m);
+
+      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
     }
   }
 
+  btn_action_last_state = btn_action_current_state;
+
+  // Edit Hours Mode
+  if (edit_time_hours_mode) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
+
+      if (DEBUG_MODE == true) {
+        Serial.print("Blink state: ");
+        Serial.println(blink_show_state);
+      }
+
+      if (blink_show_state) {
+        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+      } else {
+        display.clear();
+        display.showNumberDecEx(rtc.getMinute(), mask, false, 2, 2);
+      }
+    }
+  }
+
+  // Edit Minutes Mode
+  if (edit_time_minutes_mode) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
+
+      if (DEBUG_MODE == true) {
+        Serial.print("Blink state: ");
+        Serial.println(blink_show_state);
+      }
+
+      if (blink_show_state) {
+        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+      } else {
+        display.clear();
+        display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag), mask, true, 2, 0);
+      }
+    }
+  }
+
+  if (edit_alarm_hours_mode) {
+    
+  }
+  
+  if (edit_alarm_minutes_mode) {
+
+  }
+
+  if (edit_alarm_repeat_mode) {
+
+  }
+
+  if (normal_clock_mode) {
+    if (millis() - digit_timer > TIMER_DELAY) {
+      digit_timer = millis();  // reset digit timer
+
+      // data[0] = display.encodeDigit(h1);
+      // data[1] = display.encodeDigit(h2);
+      // data[2] = display.encodeDigit(m1);
+      // data[3] = display.encodeDigit(m2);
+      // display.setSegments(data);
+
+      display.showNumberDecEx(rtc.getHour(h12Flag, pmFlag) * 100 + rtc.getMinute(), mask, true);
+
+      // Serial.print(rtc.getHour(h12Flag, pmFlag), DEC); //24-hr
+      // Serial.print(":");
+      // Serial.print(rtc.getMinute(), DEC);
+      // Serial.print(":");
+      // Serial.println(rtc.getSecond(), DEC);
+    }
+
+    if (millis() - dot_timer > TIMER_DOTS_TICK) {
+      dot_timer = millis();  // reset dot timer
+
+      if (mask == MASK_DOTS) {
+        mask = MASK_NO_DOTS;
+      } else {
+        mask = MASK_DOTS;
+      }
+    }
+  }
+  
+  // alarm
   if (alarm_state) {
     if (millis() - melody_timer > noteDuration) {
       melody_timer = millis();  // reset melody stimer
