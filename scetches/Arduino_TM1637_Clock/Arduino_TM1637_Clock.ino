@@ -16,6 +16,21 @@ byte time_m = 0;
 
 uint8_t data[] = { 0x00, 0x00, 0x00, 0x00 };
 
+const uint8_t SEG_ON[] = {
+	0x00,
+  0x00,
+	SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,   // O
+	SEG_C | SEG_E | SEG_G,                           // n
+	};
+
+const uint8_t SEG_OFF[] = {
+	0x00,           // d
+	SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,   // O
+	SEG_A | SEG_E | SEG_F | SEG_G,           // F
+	SEG_A | SEG_E | SEG_F | SEG_G            // E
+	};
+
+
 // Display vars
 #define TIMER_DELAY   500
 #define TIMER_DOTS_TICK 1000
@@ -53,11 +68,13 @@ bool edit_time_minutes_mode = false;
 bool edit_alarm_mode = false;
 byte edit_alarm_mode_num = 0;
 
+bool alarm_status = false; // on/off status to run alarm
 bool alarm_state = false; // on/off state for playing alarm
 
 byte alarm_hours = 0;
 byte alarm_minutes = 0;
 bool alarm_repeat = false;
+bool alarm_played = false;
 byte alarm_time_repeat = 0;
 
 #define ALARM_MAX_TIME_REPEAT 3
@@ -143,6 +160,8 @@ void updateEEPROM() {
   EEPROM.write(2, alarm_hours);
   EEPROM.write(3, alarm_minutes);
   EEPROM.write(4, alarm_repeat);
+  EEPROM.write(5, alarm_played);
+  EEPROM.write(6, alarm_status);
 }
 
 // read device settings
@@ -151,6 +170,8 @@ void readEEPROM() {
   alarm_hours = EEPROM.read(2);
   alarm_minutes = EEPROM.read(3);
   alarm_repeat = EEPROM.read(4);
+  alarm_played = EEPROM.read(5);
+  alarm_status = EEPROM.read(6);
 
   if (current_brightness > 7) {
     current_brightness = 3;
@@ -181,6 +202,14 @@ bool debounce(uint8_t btn_pin, bool last) {
   return current;
 }
 
+void check_alarm(){
+  if (millis() - alarm_check_timer > TIMER_DOTS_TICK) {
+    if ((rtc.getSecond() == 0) && (alarm_hours == rtc.getHour(h12Flag, pmFlag)) && (alarm_minutes == rtc.getMinute())) {
+      alarm_state = true;
+    }
+  }
+}
+
 void setup() {
   // load saved settings
   readEEPROM();
@@ -200,8 +229,11 @@ void setup() {
     Serial.print("Alarm Repeat: ");
     Serial.println(alarm_repeat);
 
-    // rtc.setHour(12);
-    // rtc.setMinute(34);
+    Serial.print("Alarm Played: ");
+    Serial.println(alarm_played);
+
+    Serial.print("Alarm Status: ");
+    Serial.println(alarm_status);
   }
 
   // setup display
@@ -338,8 +370,22 @@ void loop() {
       updateEEPROM();
     }
 
+    // change alarm repeat every day on/off
     if (edit_alarm_mode && edit_alarm_mode_num == 3) {
       alarm_repeat = !alarm_repeat;
+      updateEEPROM();
+    }
+
+    // change alarm status on/off
+    if (edit_alarm_mode && edit_alarm_mode_num == 4) {
+      alarm_status = !alarm_status;
+      
+      if (alarm_status) {
+        display.setSegments(SEG_ON);
+      } else {
+        display.setSegments(SEG_OFF);
+      }
+
       updateEEPROM();
     }
 
@@ -368,15 +414,21 @@ void loop() {
       case 1: // alarm mode hours
       case 2: // alarm mode minutes
       case 3: // alarm mode repeat
+      case 4: // alarm status on/off
           edit_alarm_mode = true;
           normal_clock_mode = false;
         break;
     }
 
-    if (edit_alarm_mode_num > 3)  {
+    if (edit_alarm_mode_num > 4)  {
       edit_alarm_mode = false; // exit alarm mode
       normal_clock_mode = true; // return normal mode for clock
+      
       edit_alarm_mode_num = 0; // reset mode num
+      
+      alarm_played = false; // reset alarm played melody
+
+      updateEEPROM();
     }
   }
 
@@ -458,13 +510,30 @@ void loop() {
       blink_show_state = !blink_show_state;
 
       if (blink_show_state) {
-        data[0] = display.encodeDigit(10);
+        data[1] = display.encodeDigit(10);
         display.setSegments(data);
-        display.showNumberDecEx(alarm_repeat, MASK_NO_DOTS, true, 1, 3);
+        display.showNumberDecEx(alarm_repeat, MASK_DOTS, true, 1, 3);
       } else {
         display.clear();
-        data[0] = display.encodeDigit(10);
+        data[1] = display.encodeDigit(10);
         display.setSegments(data);
+      }
+    }
+  }
+
+  if (edit_alarm_mode && edit_alarm_mode_num == 4) {
+    if (millis() - blink_timer > TIMER_BLINK_TICK) {
+      blink_timer = millis();  // reset digit timer
+      blink_show_state = !blink_show_state;
+
+      if (blink_show_state) {
+        if (alarm_status) {
+          display.setSegments(SEG_ON);
+        } else {
+          display.setSegments(SEG_OFF);
+        }
+      } else {
+        display.clear();
       }
     }
   }
@@ -488,18 +557,18 @@ void loop() {
   }
 
   // check alarm
-  //if (normal_clock_mode) { // TODO: think about alarm in settings modes
-    if (!alarm_state) {
-      if (millis() - alarm_check_timer > TIMER_DOTS_TICK) {
-        if ((alarm_hours == rtc.getHour(h12Flag, pmFlag)) && (alarm_minutes == rtc.getMinute()) && (rtc.getSecond() == 0)) {
-          alarm_state = true;
-        }
-      }
+  if (alarm_status && !alarm_state) {
+    if (alarm_repeat) {
+      // check alarm if repeat mode on
+      check_alarm();
+    } else if (!alarm_played){
+      // if alarm repeat off - check if alarm not played yet
+      check_alarm();
     }
-  //}
-  
+  }
+    
   // alarm play melody
-  if (alarm_state) {
+  if (alarm_status && alarm_state) {
     if (millis() - melody_timer > noteDuration) {
       melody_timer = millis();  // reset melody stimer
 
@@ -527,6 +596,7 @@ void loop() {
         if (alarm_time_repeat >= ALARM_MAX_TIME_REPEAT) {
           alarm_state = false;
           alarm_time_repeat = 0;
+          alarm_played = true;
         }
       }
     }
